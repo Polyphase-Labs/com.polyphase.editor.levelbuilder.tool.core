@@ -1,0 +1,19 @@
+{
+    "name": "com.polyphase.editor.levelbuilder.tool.core",
+    "author": "Polyphase Labs",
+    "description": "Generic brushes (Line, Box, BoxFill, NoiseFill, Replace, Paint, MaskFill) for sibling level-builder tools. Each brush routes placements through the active sibling's spawn function so it stays kit-agnostic.",
+    "displayName": "Polyphase Level Builder Tools",
+    "version": "0.1.0",
+    "dependencies": [
+        "com.polyphase.editor.levelbuilder.core"
+    ],
+    "native": {
+        "target": "engine",
+        "sourceDir": "Source",
+        "binaryName": "com.polyphase.editor.levelbuilder.tool.core",
+        "entrySymbol": "PolyphasePlugin_GetDesc",
+        "apiVersion": 3,
+        "resolveMode": "source",
+        "binaries": []
+    }
+}
