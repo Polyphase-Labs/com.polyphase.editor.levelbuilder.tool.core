@@ -80,6 +80,14 @@ public:
     // button is held. Fired from core's DrawViewportPreview so it ticks
     // regardless of which Level Builder tab is open.
     virtual void TickEditor(float /*deltaTime*/) {}
+
+    // Default true — core's click dispatcher gates click delivery on
+    // "an active palette item is armed" so a brand-new project doesn't
+    // spawn random pieces from stray clicks. Brushes that operate on
+    // already-placed pieces (Replace, future MoveSelected, etc.)
+    // override to return false: their click is meaningful regardless
+    // of palette state.
+    virtual bool NeedsArmedPreview() const { return true; }
 };
 
 // ============================================================================

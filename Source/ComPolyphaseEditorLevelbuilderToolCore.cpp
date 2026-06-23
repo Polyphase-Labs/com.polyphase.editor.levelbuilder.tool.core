@@ -27,6 +27,7 @@
 #include "Plugins/EditorUIHooks.h"
 #include "Plugins/ImGuiPluginContext.h"
 #include "imgui.h"
+#include "ThumbnailCache.h"
 #endif
 
 #include "LevelBuilderCoreLoader.h"
@@ -35,6 +36,7 @@
 #include "LBToolBoxFill.h"
 #include "LBToolNoiseFill.h"
 #include "LBToolPaint.h"
+#include "LBToolReplace.h"
 
 static PolyphaseEngineAPI* sEngineAPI = nullptr;
 #if EDITOR
@@ -73,9 +75,10 @@ static int OnLoad(PolyphaseEngineAPI* api)
     LBToolBoxFill::Initialize(core);
     LBToolNoiseFill::Initialize(core);
     LBToolPaint::Initialize(core);
+    LBToolReplace::Initialize(core);
 
     if (api && api->LogDebug)
-        api->LogDebug("[LevelBuilderToolCore] loaded — Line / Box / BoxFill / NoiseFill / Paint brushes registered");
+        api->LogDebug("[LevelBuilderToolCore] loaded — Line / Box / BoxFill / NoiseFill / Paint / Replace brushes registered");
 
     return 0;
 }
@@ -87,12 +90,19 @@ static void OnUnload()
     {
         // Unregister in reverse-registration order so any in-flight
         // dispatch resolves to a fully-still-valid brush instance.
+        LBToolReplace::Shutdown(core);
         LBToolPaint::Shutdown(core);
         LBToolNoiseFill::Shutdown(core);
         LBToolBoxFill::Shutdown(core);
         LBToolBox::Shutdown(core);
         LBToolLine::Shutdown(core);
     }
+
+#if EDITOR
+    // Drop cached thumbnail textures BEFORE the engine tears down its
+    // Vulkan device — same pattern modular uses in its Shutdown.
+    ThumbnailCache::Clear();
+#endif
 
     LevelBuilderCoreLoader::Reset();
 
@@ -144,6 +154,10 @@ static void RegisterEditorUI(EditorUIHooks* hooks, uint64_t hookId)
         hooks->RegisterViewportOverlay(hookId,
                                        "level_builder_paint_brush",
                                        &LBToolPaint_DrawViewportOverlayTrampoline,
+                                       nullptr);
+        hooks->RegisterViewportOverlay(hookId,
+                                       "level_builder_replace_brush",
+                                       &LBToolReplace_DrawViewportOverlayTrampoline,
                                        nullptr);
     }
 }

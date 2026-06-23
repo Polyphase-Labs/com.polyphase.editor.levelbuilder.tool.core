@@ -43,7 +43,7 @@ namespace
     // v7 contract: returning 1 means "consume" — the sibling's
     // enumerate fn handles the destroy + its own registry cleanup in
     // the same transaction. We just count what's gone.
-    int EraseVisit(void* node, void* visitUd)
+    int EraseVisit(void* node, const char* /*assetName*/, void* visitUd)
     {
         if (!node) return 0;
         int* counter = (int*)visitUd;
@@ -66,7 +66,9 @@ namespace
         if (!enumFn) return 0;
 
         int destroyed = 0;
-        enumFn(&center, radius, &EraseVisit, &destroyed, enumUd);
+        // v11: null sourceAssetFilter = no filter (erase everything).
+        enumFn(&center, radius, /*sourceAssetFilter=*/nullptr,
+               &EraseVisit, &destroyed, enumUd);
         return destroyed;
     }
 

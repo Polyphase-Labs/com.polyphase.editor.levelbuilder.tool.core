@@ -34,11 +34,40 @@
     #define LEVELBUILDER_CORE_API __attribute__((visibility("default")))
 #endif
 
+// v13: Rebuild-from-world hooks — siblings register a callback that
+//      walks the scene and re-registers placed pieces. Core fires
+//      every registered callback on Level Builder mode activate so
+//      Paint Erase / Replace see pieces that were placed BEFORE this
+//      session (project save+load, hot-reload). Manual "Rebuild From
+//      World" button in each sibling's Debug accordion still works.
+//
+// v12: Replace eyedropper — LBVisitFn now receives the piece's asset
+//      name alongside the node pointer. Lets tool.core's Replace brush
+//      "pick source from scene" mode read the asset of whatever was
+//      clicked without a separate registry-lookup ABI. Old visitors
+//      that ignore the new parameter still compile if they switch to
+//      the new typedef — both Paint (Erase) and Replace use it.
+//
+// v11: Replace brush asset filter — LBEnumeratePlacementsFn gains a
+//      `sourceAssetFilter` parameter. Null / empty = no filter (legacy
+//      behavior). Non-empty = sibling only visits placed pieces whose
+//      asset name matches the filter. Lets the Replace brush swap
+//      only specific source pieces (e.g. all "wall_grey_001" → final
+//      art) without touching neighboring unrelated pieces.
+//
+// v10: R4 piece-level mutation surface — Kit_CreateKit / Kit_DeleteKit /
+// Kit_SetKitName for kit-level ops, Kit_AddPiece / Kit_RemovePiece +
+// Kit_SetPieceName / Asset / Category / IconPath for piece-level ops. Kit
+// metadata setters already shipped in v6 (Kit_SetMetaString); socket
+// mutation shipped in v5 (Kit_AddSocket et al). Batch semantics are
+// implicit — every mutation edits core's in-memory kit; Kit_Save flushes
+// the whole kit as one JSON snapshot.
+//
 // v9: removed addon-side LBHistory shim (v8). Undo now goes through the
 // engine's PolyphaseEngineAPI::EditorAction_Push / _BeginGroup / _EndGroup
 // (engine plugin-API v6+), so the level-builder's spawn / destroy
 // interleaves correctly with the editor's native ActionManager.
-#define LEVEL_BUILDER_CORE_API_VERSION 9
+#define LEVEL_BUILDER_CORE_API_VERSION 13
 
 // ===== Forward declarations =====
 
@@ -469,10 +498,16 @@ struct LevelBuilderCoreAPI
     // clean its own registry in the same transaction — that prevents
     // the use-after-free that bit us in v7 first-cut (Paint dragging
     // over already-erased nodes re-destroyed dangling pointers).
-    typedef int (*LBVisitFn)(void* node, void* visitUserData);
+    // v12: assetName is the sibling's stored asset name for the piece
+    // (== request.assetName when it was placed). Lifetime is the sibling
+    // registry entry's — valid for the duration of the visit call.
+    // Visitors that don't need it can just ignore the parameter.
+    typedef int (*LBVisitFn)(void* node, const char* assetName,
+                             void* visitUserData);
     typedef void (*LBEnumeratePlacementsFn)(
         const LBVec3* center,
         float         radius,
+        const char*   sourceAssetFilter,  // v11: null/empty = no filter
         LBVisitFn     visit,
         void*         visitUserData,
         void*         siblingUserData);
@@ -489,6 +524,63 @@ struct LevelBuilderCoreAPI
     // directly. The level-builder defines a uniform LBPiecePresenceRecord
     // userData shape in each sibling (modular, grid, …) and does its own
     // delete-cleanup via the free callback.
+
+    // ===== v10 — R4 piece-level mutation surface ==========================
+    //
+    // Completes the core-kits R4 refactor: kit-level create / rename /
+    // delete, plus per-piece add / remove and string-field setters.
+    // Socket mutation is v5; kit-metadata setters are v6; this is the
+    // final mutation hole.
+    //
+    // Semantics:
+    //   - All mutators edit core's in-memory LBKit. Kit_Save flushes the
+    //     whole kit to its sourceFile in one JSON write — that's the
+    //     "transaction" boundary the R4 plan asked for; no per-edit
+    //     auto-save and no transaction stack.
+    //   - Kit_AddPiece / Kit_RemovePiece invalidate piece indices on
+    //     that kit. Sibling UIs that cached pieceIdx must re-resolve
+    //     (e.g. via Kit_FindPieceByAsset) on the next frame.
+    //   - Kit_CreateKit names the new kit's sourceFile to
+    //     <project>/Kits/<sanitized-name>.json. Kit_Save persists it
+    //     there; the file isn't written by Kit_CreateKit itself.
+    //   - Kit_SetKitName renames the kit in the registry's by-name map
+    //     and updates the active-kit pointer if it pointed at the old
+    //     name. It does NOT rename the sourceFile on disk — call
+    //     Kit_Save first if you want the rename reflected on disk
+    //     (Save writes to the same sourceFile path; if the rename also
+    //     needs the file moved, the UI does that out-of-band today).
+    //   - Kit_DeleteKit removes from the registry only. The sourceFile
+    //     stays on disk unless the caller deletes it separately.
+
+    // Kit-level mutation.
+    int  (*Kit_CreateKit)(const char* name);   // returns new kitIdx, -1 on failure
+    int  (*Kit_DeleteKit)(int kitIdx);          // returns 1 on success
+    int  (*Kit_SetKitName)(int kitIdx, const char* newName);  // 1 on success
+
+    // Piece-level add / remove.
+    int  (*Kit_AddPiece)(int kitIdx, const char* name, const char* assetName);   // returns new pieceIdx
+    int  (*Kit_RemovePiece)(int kitIdx, int pieceIdx);                            // 1 on success
+
+    // Per-piece string setters. NULL clears the field. Out-of-range index
+    // is a no-op. Strings are copied into core's storage; caller may free
+    // its buffer immediately after the call.
+    void (*Kit_SetPieceName)    (int kitIdx, int pieceIdx, const char* name);
+    void (*Kit_SetPieceAsset)   (int kitIdx, int pieceIdx, const char* assetName);
+    void (*Kit_SetPieceCategory)(int kitIdx, int pieceIdx, const char* category);
+    void (*Kit_SetPieceIconPath)(int kitIdx, int pieceIdx, const char* iconPath);
+
+    // ===== v13 — Rebuild-from-world hooks =====
+    // Sibling registers a callback that walks the active scene and re-
+    // registers placed pieces into its own placed-piece registry. Core
+    // fires every registered callback automatically when the user
+    // activates Level Builder mode, so Paint Erase / Replace see pre-
+    // existing placements without the user having to click the
+    // "Rebuild From World" button in the Debug accordion.
+    typedef void (*LBRebuildFromWorldFn)(void* userData);
+    void (*RegisterRebuildFromWorldFn)(const char* toolName,
+                                       LBRebuildFromWorldFn fn,
+                                       void* userData);
+    void (*UnregisterRebuildFromWorldFn)(const char* toolName);
 };
 
 // ===== Entry point =====

@@ -115,12 +115,16 @@
     <ClInclude Include="Source\LBToolNoiseFill.h" />
     <ClCompile Include="Source\LBToolPaint.cpp" />
     <ClInclude Include="Source\LBToolPaint.h" />
+    <ClCompile Include="Source\LBToolReplace.cpp" />
+    <ClInclude Include="Source\LBToolReplace.h" />
     <ClCompile Include="Source\LBToolShared.cpp" />
     <ClInclude Include="Source\LBToolShared.h" />
     <ClInclude Include="Source\LevelBuilderCoreAPI.h" />
     <ClCompile Include="Source\LevelBuilderCoreLoader.cpp" />
     <ClInclude Include="Source\LevelBuilderCoreLoader.h" />
     <ClInclude Include="Source\LevelBuilderInterfaces.h" />
+    <ClCompile Include="Source\ThumbnailCache.cpp" />
+    <ClInclude Include="Source\ThumbnailCache.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="M:\Projects\Polyphase\Addons\GridWorld_B\Packages\com.polyphase.editor.levelbuilder.core\com.polyphase.editor.levelbuilder.core.vcxproj">
