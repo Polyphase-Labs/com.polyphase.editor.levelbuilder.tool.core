@@ -8,11 +8,14 @@
 #if EDITOR
 #include "imgui.h"
 #include "Plugins/PolyphaseEngineAPI.h"
+#include "LBToolPicker.h"
+#include "LBToolMaskImage.h"
 #endif
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace
@@ -29,6 +32,26 @@ namespace
     float     sJitterYaw   = 0.0f;       // ±degrees
     float     sStampMs     = 80.0f;      // ms between stamps (Add minimum interval)
     uint32_t  sSeed        = 12345u;
+
+    // Multi-target list for Add mode. Each stamp picks one at random.
+    // Empty → falls back to the active palette piece (request.assetName).
+    std::vector<std::string> sAddTargets;
+
+    // Modal latch — set by the "Edit targets…" button, consumed next frame.
+    bool sOpenAddPicker = false;
+    bool sJustOpened    = false;
+
+    // Optional mask brush. When loaded, each stamp samples the mask at
+    // its disc-relative UV and only spawns where the pixel luminance
+    // passes threshold (or is below it if Invert). Reuses the shared
+    // mask state from LBToolMaskImage so the same Browse / Reload /
+    // thumbnail UI applies. Toggle off via sUseMask without clearing.
+#if EDITOR
+    LBToolMaskImage::MaskState sMask;
+#endif
+    bool  sUseMask         = false;
+    float sMaskThreshold   = 0.50f;   // [0,1] luminance cutoff
+    bool  sMaskInvert      = false;
 
     // Per-frame accumulator: when LMB is held in Add mode we accumulate
     // time since the last stamp and emit one whenever the accumulator
@@ -95,11 +118,51 @@ namespace
 
         int spawned = 0;
         const float jitterRadius = sRadius * std::clamp(sJitterPos, 0.0f, 1.0f);
+
+#if EDITOR
+        const bool useMask = sUseMask && LBToolMaskImage::EnsureLoaded(sMask)
+                                       && sRadius > 0.001f;
+        const int  mthresh255 = (int)(std::clamp(sMaskThreshold, 0.0f, 1.0f) * 255.0f);
+#else
+        const bool useMask = false;
+        const int  mthresh255 = 0;
+#endif
+
         for (int i = 0; i < nWhole; ++i)
         {
             LBVec3 pos = LBToolDistribution::RandomInDisc(center, jitterRadius, rng);
+
+            // Mask gate — if a mask is loaded, the disc-relative position
+            // of THIS candidate selects a pixel; we only spawn when that
+            // pixel passes threshold. Lets the user "spray PNG" the brush
+            // outline (Photoshop-style alpha brush).
+            if (useMask)
+            {
+#if EDITOR
+                const float dx = pos.x - center.x;
+                const float dz = pos.z - center.z;
+                // Map disc-relative position to mask UV. World +Z up
+                // matches image up (LBToolMaskImage::Sample flips v
+                // internally so we just pass through with a sign flip
+                // to invert dz before normalization).
+                const float u = std::clamp((dx / sRadius) * 0.5f + 0.5f, 0.0f, 1.0f);
+                const float v = std::clamp((-dz / sRadius) * 0.5f + 0.5f, 0.0f, 1.0f);
+                const LBToolMaskImage::Pixel p = LBToolMaskImage::Sample(sMask, u, v);
+                const int lum = ((int)p.r + (int)p.g + (int)p.b) / 3;
+                const bool passes = sMaskInvert ? (lum < mthresh255) : (lum >= mthresh255);
+                if (!passes) continue;
+#endif
+            }
+
             LBQuat rot = LBToolDistribution::JitteredYaw(LBQuat{0,0,0,1}, sJitterYaw, rng);
-            if (spawn(nullptr, &pos, &rot, userData))
+            // Multi-target pick per stamp. nullptr fallback = sibling
+            // resolves to the active palette item.
+#if EDITOR
+            const char* asset = LBToolPicker::PickFromList(sAddTargets, nullptr, rng);
+#else
+            const char* asset = nullptr;
+#endif
+            if (spawn(asset, &pos, &rot, userData))
                 ++spawned;
         }
         return spawned;
@@ -241,10 +304,89 @@ void LBToolPaint::DrawSettingsUI()
         sSeed = (uint32_t)(seedI <= 0 ? 1 : seedI);
 
     ImGui::Spacing();
+
+    // ---- Mask brush (Add mode only) ----
+    if (sMode != Mode::Erase)
+    {
+        if (ImGui::CollapsingHeader("Mask brush (PNG)##paint_mask",
+                                    ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::Checkbox("Use mask##paint_use_mask", &sUseMask);
+            if (sUseMask)
+            {
+                ImGui::TextDisabled(
+                    "Each stamp samples the mask at its disc-relative UV — "
+                    "only places where pixel luminance passes threshold. "
+                    "Cursor disc maps to the mask square; mask alpha "
+                    "becomes the brush shape.");
+                LBToolMaskImage::DrawMaskUI(sMask, "paint");
+                ImGui::SliderFloat("Mask threshold", &sMaskThreshold, 0.0f, 1.0f, "%.2f");
+                ImGui::Checkbox("Invert (place where BELOW threshold)", &sMaskInvert);
+            }
+        }
+        ImGui::Spacing();
+    }
+
+    // ---- Targets (Add mode only — Erase doesn't pick anything) ----
+    if (sMode != Mode::Erase)
+    {
+        LevelBuilderCoreAPI* api = CoreAPI();
+        std::vector<LBToolPicker::PieceChoice> pieces =
+            LBToolPicker::CollectActiveKitPieces(api);
+        const std::string projectRoot = LBToolPicker::CachedProjectRoot();
+        const std::string kitFolder   = LBToolPicker::GetActiveKitFolder(api);
+
+        ImGui::TextUnformatted("Targets (random pick per stamp)");
+        if (sAddTargets.empty())
+        {
+            ImGui::TextDisabled("(empty → uses active palette piece)");
+        }
+        else
+        {
+            for (int i = 0; i < (int)sAddTargets.size(); ++i)
+            {
+                ImGui::PushID(i);
+                const LBToolPicker::PieceChoice* pc =
+                    LBToolPicker::FindByAsset(pieces, sAddTargets[i]);
+                LBToolPicker::DrawThumbButton(pc, projectRoot, kitFolder,
+                                              32.0f, false, "paint_tgt", "?");
+                if (ImGui::IsItemHovered() && pc)
+                    ImGui::SetTooltip("%s", pc->display.c_str());
+                ImGui::PopID();
+                if (i + 1 < (int)sAddTargets.size()) ImGui::SameLine();
+            }
+        }
+        if (ImGui::Button("Edit targets…##paint_edit_targets",
+                          ImVec2(150, 0)))
+        {
+            sOpenAddPicker = true;
+            sJustOpened    = true;
+        }
+        if (sAddTargets.size() > 1)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(random pick per stamp)");
+        }
+
+        ImGui::Spacing();
+    }
+
     ImGui::TextDisabled("Mode determines what each mouse button does:");
     ImGui::BulletText("Add — LMB stamps, RMB does nothing");
     ImGui::BulletText("Erase — LMB erases, RMB does nothing");
     ImGui::BulletText("Both — LMB stamps, RMB erases");
+
+    // ---- Modal — opened from the latch above ----
+    if (sOpenAddPicker)
+    {
+        ImGui::OpenPopup("Paint: Targets##paint_add_modal");
+        sOpenAddPicker = false;
+    }
+    LBToolPicker::DrawPiecePickerModal("Paint: Targets##paint_add_modal",
+                                       "Paint Add — multi-select (random per stamp)",
+                                       /*multiSelect=*/true,
+                                       /*allowAny=*/false,
+                                       sJustOpened, &sAddTargets);
 #endif
 }
 
@@ -258,6 +400,11 @@ void LBToolPaint::Shutdown(LevelBuilderCoreAPI* api)
 {
     if (!api) return;
     if (api->UnregisterBrush) api->UnregisterBrush("Paint");
+#if EDITOR
+    sMask.rgba.clear();
+    sMask.w = sMask.h = 0;
+    sMask.loadedPath.clear();
+#endif
     sStampAccum = 0.0f;
     sLmbWasDown = false;
     sRmbWasDown = false;

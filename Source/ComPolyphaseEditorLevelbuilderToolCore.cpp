@@ -37,6 +37,7 @@
 #include "LBToolNoiseFill.h"
 #include "LBToolPaint.h"
 #include "LBToolReplace.h"
+#include "LBToolMaskFill.h"
 
 static PolyphaseEngineAPI* sEngineAPI = nullptr;
 #if EDITOR
@@ -76,9 +77,10 @@ static int OnLoad(PolyphaseEngineAPI* api)
     LBToolNoiseFill::Initialize(core);
     LBToolPaint::Initialize(core);
     LBToolReplace::Initialize(core);
+    LBToolMaskFill::Initialize(core);
 
     if (api && api->LogDebug)
-        api->LogDebug("[LevelBuilderToolCore] loaded — Line / Box / BoxFill / NoiseFill / Paint / Replace brushes registered");
+        api->LogDebug("[LevelBuilderToolCore] loaded — Line / Box / BoxFill / NoiseFill / Paint / Replace / MaskFill brushes registered");
 
     return 0;
 }
@@ -90,6 +92,7 @@ static void OnUnload()
     {
         // Unregister in reverse-registration order so any in-flight
         // dispatch resolves to a fully-still-valid brush instance.
+        LBToolMaskFill::Shutdown(core);
         LBToolReplace::Shutdown(core);
         LBToolPaint::Shutdown(core);
         LBToolNoiseFill::Shutdown(core);
@@ -158,6 +161,10 @@ static void RegisterEditorUI(EditorUIHooks* hooks, uint64_t hookId)
         hooks->RegisterViewportOverlay(hookId,
                                        "level_builder_replace_brush",
                                        &LBToolReplace_DrawViewportOverlayTrampoline,
+                                       nullptr);
+        hooks->RegisterViewportOverlay(hookId,
+                                       "level_builder_mask_fill_brush",
+                                       &LBToolMaskFill_DrawViewportOverlayTrampoline,
                                        nullptr);
     }
 }

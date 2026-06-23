@@ -111,10 +111,16 @@
     <ClInclude Include="Source\LBToolDistribution.h" />
     <ClCompile Include="Source\LBToolLine.cpp" />
     <ClInclude Include="Source\LBToolLine.h" />
+    <ClCompile Include="Source\LBToolMaskFill.cpp" />
+    <ClInclude Include="Source\LBToolMaskFill.h" />
+    <ClCompile Include="Source\LBToolMaskImage.cpp" />
+    <ClInclude Include="Source\LBToolMaskImage.h" />
     <ClCompile Include="Source\LBToolNoiseFill.cpp" />
     <ClInclude Include="Source\LBToolNoiseFill.h" />
     <ClCompile Include="Source\LBToolPaint.cpp" />
     <ClInclude Include="Source\LBToolPaint.h" />
+    <ClCompile Include="Source\LBToolPicker.cpp" />
+    <ClInclude Include="Source\LBToolPicker.h" />
     <ClCompile Include="Source\LBToolReplace.cpp" />
     <ClInclude Include="Source\LBToolReplace.h" />
     <ClCompile Include="Source\LBToolShared.cpp" />

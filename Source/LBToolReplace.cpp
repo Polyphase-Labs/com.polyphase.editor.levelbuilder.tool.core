@@ -9,16 +9,14 @@
 #include "imgui.h"
 #include "Plugins/PolyphaseEngineAPI.h"
 #include "Engine/Nodes/3D/Node3d.h"
-#include "ThumbnailCache.h"
+#include "LBToolPicker.h"
 #endif
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 namespace
@@ -258,300 +256,15 @@ LevelBuilderPlacementResult LBToolReplace::Place(const LevelBuilderPlacementRequ
 }
 
 #if EDITOR
-namespace
-{
-    // ---- Active-kit piece info struct ----
-    struct PieceChoice
-    {
-        std::string display;
-        std::string asset;
-        std::string category;
-        std::string iconPath;       // as stored on the piece (kit- or root-relative)
-    };
-
-    std::vector<PieceChoice> CollectActiveKitPieces(LevelBuilderCoreAPI* api)
-    {
-        std::vector<PieceChoice> out;
-        if (!api || !api->Kit_GetActiveIndex || !api->Kit_GetInfo
-                 || !api->Kit_GetPieceInfo)
-            return out;
-
-        int kitIdx = api->Kit_GetActiveIndex();
-        if (kitIdx < 0) return out;
-        LBKitInfo ki{};
-        if (!api->Kit_GetInfo(kitIdx, &ki)) return out;
-        out.reserve(ki.pieceCount);
-        for (int i = 0; i < ki.pieceCount; ++i)
-        {
-            LBPieceInfo pi{};
-            if (!api->Kit_GetPieceInfo(kitIdx, i, &pi)) continue;
-            PieceChoice pc;
-            pc.display  = pi.name      ? pi.name      : (pi.assetName ? pi.assetName : "<unnamed>");
-            pc.asset    = pi.assetName ? pi.assetName : "";
-            pc.category = pi.category  ? pi.category  : "";
-            pc.iconPath = pi.iconPath  ? pi.iconPath  : "";
-            if (!pc.asset.empty()) out.push_back(std::move(pc));
-        }
-        return out;
-    }
-
-    // ---- Icon path resolution (mirrors modular's pattern) ----
-    const std::string& CachedProjectRoot()
-    {
-        static std::string sRoot;
-        LevelBuilderCoreAPI* api = CoreAPI();
-        if (api && api->GetProjectRoot)
-        {
-            const char* p = api->GetProjectRoot();
-            if (p && *p) { sRoot = p; return sRoot; }
-        }
-        sRoot.clear();
-        return sRoot;
-    }
-
-    std::string GetActiveKitFolder(LevelBuilderCoreAPI* api)
-    {
-        if (!api || !api->Kit_GetActiveIndex || !api->Kit_GetInfo) return {};
-        int kitIdx = api->Kit_GetActiveIndex();
-        if (kitIdx < 0) return {};
-        LBKitInfo ki{};
-        if (!api->Kit_GetInfo(kitIdx, &ki)) return {};
-        if (!ki.sourceFile || !*ki.sourceFile) return {};
-        return std::filesystem::path(ki.sourceFile).parent_path().string();
-    }
-
-    std::string ResolveIconAbs(const std::string& iconPath,
-                               const std::string& projectRoot,
-                               const std::string& kitFolder)
-    {
-        if (iconPath.empty()) return {};
-        namespace fs = std::filesystem;
-        std::error_code ec;
-        fs::path ip(iconPath);
-        if (ip.is_absolute()) return iconPath;
-        if (!kitFolder.empty())
-        {
-            fs::path a = fs::path(kitFolder) / iconPath;
-            if (fs::is_regular_file(a, ec)) return a.string();
-        }
-        if (!projectRoot.empty())
-        {
-            fs::path a = fs::path(projectRoot) / iconPath;
-            return a.string();   // ThumbnailCache will log if missing
-        }
-        return iconPath;
-    }
-
-    ImTextureID FetchThumbnail(const PieceChoice& pc,
-                               const std::string& projectRoot,
-                               const std::string& kitFolder)
-    {
-        if (pc.iconPath.empty()) return 0;
-        std::string abs = ResolveIconAbs(pc.iconPath, projectRoot, kitFolder);
-        if (abs.empty()) return 0;
-        return ThumbnailCache::Get(abs);
-    }
-
-    // ---- Thumbnail button ----
-    // Renders a square thumbnail button. Returns true if clicked.
-    // `pc` may be null (renders a placeholder "+" / "?" tile).
-    // When `selected` is true, the tile gets a bold cyan border + tint
-    // so it's unmistakable across both image and text-fallback paths.
-    bool DrawThumbButton(const PieceChoice* pc,
-                        const std::string& projectRoot,
-                        const std::string& kitFolder,
-                        float size,
-                        bool selected,
-                        const char* idStr,
-                        const char* placeholderLabel = "?")
-    {
-        ImGui::PushID(idStr);
-        bool clicked = false;
-
-        ImTextureID tex = pc ? FetchThumbnail(*pc, projectRoot, kitFolder) : 0;
-
-        if (tex != 0)
-        {
-            // ImageButton bg_col tints the slot when selected. Subtle
-            // cyan halo behind the PNG.
-            const ImVec4 bg = selected
-                              ? ImVec4(0.20f, 0.85f, 1.0f, 0.45f)
-                              : ImVec4(0, 0, 0, 0);
-            clicked = ImGui::ImageButton("##thumb", tex, ImVec2(size, size),
-                                         ImVec2(0,0), ImVec2(1,1), bg);
-        }
-        else
-        {
-            // Text fallback — push a saturated button color when selected.
-            if (selected)
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.18f, 0.45f, 0.80f, 1.0f));
-            if (selected)
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.55f, 0.90f, 1.0f));
-            std::string lbl = pc ? pc->display.substr(0, 12) : placeholderLabel;
-            clicked = ImGui::Button(lbl.c_str(), ImVec2(size + 8, size + 8));
-            if (selected) { ImGui::PopStyleColor(); ImGui::PopStyleColor(); }
-        }
-
-        // Bold border around the tile post-draw. Drawn at the item's
-        // actual on-screen rect so it lines up with whichever button
-        // primitive ran above. 3px stroke is loud enough to read at
-        // 48px / 64px tile sizes.
-        if (selected)
-        {
-            ImVec2 mn = ImGui::GetItemRectMin();
-            ImVec2 mx = ImGui::GetItemRectMax();
-            ImU32  col = IM_COL32(50, 220, 255, 255);
-            ImGui::GetWindowDrawList()->AddRect(mn, mx, col, 4.0f, 0, 3.0f);
-        }
-
-        ImGui::PopID();
-        return clicked;
-    }
-
-    // ---- Piece picker modal ----
-    // `multiSelect` = false → click a tile, modal closes, `out` becomes
-    // a one-element vector with the picked asset (or empty if X'd).
-    // `multiSelect` = true → tiles toggle; user clicks Confirm to apply.
-    //
-    // `initialSelection` is shown checked on open; `out` carries the
-    // user's chosen set when the function returns true (= confirmed).
-    bool DrawPiecePickerModal(const char* modalId,
-                              const char* headerLabel,
-                              bool multiSelect,
-                              std::vector<std::string>* out)
-    {
-        bool confirmed = false;
-        if (!out) return false;
-
-        // Snapshot the selection on first open of THIS modal — multi-
-        // select uses a local working set so Cancel is a real cancel.
-        static std::unordered_set<std::string> sWorkingSet;
-        static bool sJustOpened = false;
-        if (ImGui::IsPopupOpen(modalId) && sJustOpened)
-        {
-            sWorkingSet.clear();
-            for (const auto& a : *out) sWorkingSet.insert(a);
-            sJustOpened = false;
-        }
-
-        ImGui::SetNextWindowSize(ImVec2(680.0f, 520.0f), ImGuiCond_FirstUseEver);
-        if (!ImGui::BeginPopupModal(modalId, nullptr, 0))
-            return false;
-
-        LevelBuilderCoreAPI* api = CoreAPI();
-        std::vector<PieceChoice> pieces = CollectActiveKitPieces(api);
-        const std::string  projectRoot = CachedProjectRoot();
-        const std::string  kitFolder   = GetActiveKitFolder(api);
-
-        // Header — kit name + count + special "Any" entry for source.
-        const char* activeKitName = (api && api->Kit_GetActiveName)
-                                  ? api->Kit_GetActiveName() : "<no kit>";
-        ImGui::Text("%s — Active kit: %s   (%d piece(s))",
-                    headerLabel,
-                    (activeKitName && *activeKitName) ? activeKitName : "<none>",
-                    (int)pieces.size());
-        ImGui::Separator();
-
-        // Special "<any piece in radius>" entry for the Source picker
-        // (single-select only — multi-select doesn't need an "any").
-        if (!multiSelect)
-        {
-            if (ImGui::Button("<any piece in radius>", ImVec2(220, 30)))
-            {
-                out->clear();           // empty = any
-                ImGui::CloseCurrentPopup();
-                ImGui::EndPopup();
-                confirmed = true;
-                return confirmed;
-            }
-            ImGui::Spacing();
-            ImGui::Separator();
-        }
-
-        // Grid of thumbnail tiles.
-        const float thumbSize = 64.0f;
-        const float cellW     = thumbSize + 16.0f;
-        const float avail     = ImGui::GetContentRegionAvail().x;
-        const int   cols      = std::max(1, (int)(avail / cellW));
-
-        ImGui::BeginChild("##picker_scroll",
-                          ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8),
-                          true);
-        for (int i = 0; i < (int)pieces.size(); ++i)
-        {
-            const PieceChoice& pc = pieces[i];
-            const bool isSel = (sWorkingSet.find(pc.asset) != sWorkingSet.end());
-
-            ImGui::BeginGroup();
-            char idBuf[64];
-            std::snprintf(idBuf, sizeof(idBuf), "pick_%d", i);
-            bool clicked = DrawThumbButton(&pc, projectRoot, kitFolder,
-                                           thumbSize, isSel, idBuf);
-            // Truncated label under the tile.
-            std::string lbl = pc.display.size() > 14
-                              ? (pc.display.substr(0, 12) + "..")
-                              : pc.display;
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cellW);
-            ImGui::TextWrapped("%s", lbl.c_str());
-            ImGui::PopTextWrapPos();
-            ImGui::EndGroup();
-
-            if (clicked)
-            {
-                if (multiSelect)
-                {
-                    // Toggle membership.
-                    if (isSel) sWorkingSet.erase(pc.asset);
-                    else       sWorkingSet.insert(pc.asset);
-                }
-                else
-                {
-                    out->clear();
-                    out->push_back(pc.asset);
-                    ImGui::EndChild();
-                    ImGui::CloseCurrentPopup();
-                    ImGui::EndPopup();
-                    return true;
-                }
-            }
-
-            // Column wrap.
-            if (((i + 1) % cols) != 0) ImGui::SameLine();
-        }
-        ImGui::EndChild();
-
-        // Footer — Confirm/Cancel for multi-select, Cancel for single.
-        if (multiSelect)
-        {
-            if (ImGui::Button("Confirm", ImVec2(120, 0)))
-            {
-                out->clear();
-                out->reserve(sWorkingSet.size());
-                for (const auto& a : sWorkingSet) out->push_back(a);
-                std::sort(out->begin(), out->end());
-                ImGui::CloseCurrentPopup();
-                confirmed = true;
-            }
-            ImGui::SameLine();
-        }
-        if (ImGui::Button("Cancel", ImVec2(120, 0)))
-        {
-            ImGui::CloseCurrentPopup();
-        }
-
-        ImGui::EndPopup();
-        return confirmed;
-    }
-
-    // Find the PieceChoice matching an asset name (linear; kits are small).
-    const PieceChoice* FindByAsset(const std::vector<PieceChoice>& pieces,
-                                   const std::string& asset)
-    {
-        for (const auto& p : pieces)
-            if (p.asset == asset) return &p;
-        return nullptr;
-    }
-}
+// PieceChoice + helpers + modal moved to LBToolPicker. Re-using the
+// shared symbols here keeps the brushes thin.
+using LBToolPicker::PieceChoice;
+using LBToolPicker::CollectActiveKitPieces;
+using LBToolPicker::FindByAsset;
+using LBToolPicker::CachedProjectRoot;
+using LBToolPicker::GetActiveKitFolder;
+using LBToolPicker::DrawThumbButton;
+using LBToolPicker::DrawPiecePickerModal;
 #endif
 
 void LBToolReplace::DrawSettingsUI()
@@ -693,6 +406,8 @@ void LBToolReplace::DrawSettingsUI()
     if (DrawPiecePickerModal("Pick Source##replace_src_modal",
                              "Source — single select",
                              /*multiSelect=*/false,
+                             /*allowAny=*/true,
+                             sJustOpened,
                              &srcPicked))
     {
         sSourceAsset = srcPicked.empty() ? std::string() : srcPicked[0];
@@ -700,6 +415,8 @@ void LBToolReplace::DrawSettingsUI()
     if (DrawPiecePickerModal("Pick Targets##replace_tgt_modal",
                              "Targets — multi-select (random pick per swap)",
                              /*multiSelect=*/true,
+                             /*allowAny=*/false,
+                             sJustOpened,
                              &sTargetAssets))
     {
         // sTargetAssets already overwritten by the modal on confirm.
