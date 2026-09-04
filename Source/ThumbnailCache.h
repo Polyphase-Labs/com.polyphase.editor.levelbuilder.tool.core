@@ -1,16 +1,18 @@
 /**
  * @file ThumbnailCache.h
- * @brief PNG-on-disk → ImGui texture handle cache for the modular addon's
- *        Phase-1 piece browser.
+ * @brief Thin shim over the engine's shared editor image cache.
  *
- * Mirrors the pattern in the engine's AddonsWindow.cpp (PNG via stb_image,
- * uploaded into a Vulkan Image, registered with ImGui_ImplVulkan_AddTexture).
- * The engine doesn't yet expose this through the plugin API; until it does,
- * the addon owns its own loader.
+ * The engine owns thumbnail decode + GPU upload behind
+ * EditorUIHooks::EditorImage_Load (plugin API v9). This file used to carry its
+ * own stb_image + Vulkan Image loader, copied from the engine's
+ * AddonsWindow.cpp; that never actually linked, because class Image,
+ * DestroyQueue, GetDestroyQueue and DeviceWaitIdle carry no POLYPHASE_API
+ * annotation and so are absent from Polyphase.lib. The engine now exposes the
+ * capability properly, and this is a forwarder.
  *
- * Lifetime: entries live until Clear() is called. Clear() must run *before*
- * the engine destroys the Vulkan device — i.e. from ModularPlacement::Shutdown,
- * not from a static destructor.
+ * Lifetime: textures are owned by the EDITOR for the whole session. Nothing
+ * here holds a GPU resource, so hot-reload is trivially safe — Clear() only
+ * drops our pointer to the (engine-owned, permanently valid) hooks struct.
  */
 
 #pragma once
@@ -21,17 +23,24 @@
 
 #include <string>
 
+struct EditorUIHooks;
+
 namespace ThumbnailCache
 {
-    // Returns an ImGui-renderable texture handle for the PNG at `absPath`,
-    // or 0 if the file is missing / un-decodable. Same path returns the
-    // same handle across frames. A failure is cached so we don't retry the
-    // open every frame.
+    // Called once from the addon's RegisterEditorUI. Safe to call again on
+    // hot-reload; the pointer is engine-owned and stable.
+    void Bind(EditorUIHooks* hooks);
+
+    // Returns an ImGui-renderable texture handle for the image at `absPath`,
+    // or 0 if the file is missing / un-decodable, the engine predates plugin
+    // API v9, or the backend isn't Vulkan. Same path returns the same handle
+    // across frames; repeat calls are a hash lookup inside the engine, and
+    // failures are negatively cached there.
     ImTextureID Get(const std::string& absPath);
 
-    // DeviceWaitIdle, then release every cached descriptor + image. Call
-    // exactly once during addon teardown before the engine tears Vulkan
-    // down.
+    // Drop our reference to the hooks struct. Textures are NOT released — the
+    // engine keeps them for the editor session on purpose (see the ownership
+    // note in EditorUIHooks.h). Call during addon teardown.
     void Clear();
 }
 

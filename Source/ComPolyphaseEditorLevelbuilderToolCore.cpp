@@ -128,6 +128,7 @@ static void RegisterEditorUI(EditorUIHooks* hooks, uint64_t hookId)
 {
     sHooks  = hooks;
     sHookId = hookId;
+    ThumbnailCache::Bind(hooks);
 
     // Viewport overlay for the Line brush — draws the start-point sphere,
     // the live line to the hovered hit, and stride markers along it. The

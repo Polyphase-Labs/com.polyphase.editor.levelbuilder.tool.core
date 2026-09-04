@@ -7,11 +7,17 @@
 #if EDITOR
 #include "imgui.h"
 #include "Plugins/PolyphaseEngineAPI.h"
+#include "LBToolPicker.h"
+#include "LBToolMaskImage.h"
+#include "LBToolDistribution.h"
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace
 {
@@ -20,6 +26,18 @@ namespace
     bool   sHasStart            = false;
     LBVec3 sStart{0, 0, 0};
     float  sStride              = 1.0f;
+
+    // Multi-target + mask state (same pattern as Line / Paint).
+    std::vector<std::string> sTargets;
+    bool sOpenTargetsPicker = false;
+    bool sJustOpened        = false;
+    uint32_t sSeed          = 0xBEEFu;
+#if EDITOR
+    LBToolMaskImage::MaskState sMask;
+#endif
+    bool  sUseMask       = false;
+    float sMaskThreshold = 0.50f;
+    bool  sMaskInvert    = false;
     // Default: each edge gets a 0/90/180/270° yaw added on top of the
     // user's R rotation so walls along +X edges face along +X, walls
     // along +Z edges face along +Z, etc. The user dials R to align
@@ -184,6 +202,27 @@ LevelBuilderPlacementResult LBToolBox::Place(const LevelBuilderPlacementRequest&
 #if EDITOR
     PolyphaseEngineAPI* eng = (PolyphaseEngineAPI*)api->GetEngineAPI();
     if (eng && eng->EditorAction_BeginGroup) eng->EditorAction_BeginGroup("Box");
+    LBToolDistribution::Rng rng = LBToolDistribution::SeedRng(sSeed);
+    sSeed = (sSeed * 1103515245u + 12345u) | 1u;
+    const bool useMask = sUseMask && LBToolMaskImage::EnsureLoaded(sMask);
+    const int  mthresh255 = (int)(std::clamp(sMaskThreshold, 0.0f, 1.0f) * 255.0f);
+
+    // Pre-compute total perimeter point count for mask U-mapping (1D
+    // sweep around the perimeter).
+    int totalForMask = 0;
+    if (useMask)
+    {
+        for (int e = 0; e < 4; ++e)
+        {
+            const LBVec3& aa = corners[e];
+            const LBVec3& bb = corners[(e + 1) % 4];
+            LBVec3 a2x, b2x;
+            InsetEdgeByHalfStride(aa, bb, stride, a2x, b2x);
+            totalForMask += LBToolShared::BuildStrideWalk(a2x, b2x, stride).PieceCount();
+        }
+        if (totalForMask <= 0) totalForMask = 1;
+    }
+    int perimIndex = 0;
 #endif
 
     for (int e = 0; e < 4; ++e)
@@ -220,7 +259,22 @@ LevelBuilderPlacementResult LBToolBox::Place(const LevelBuilderPlacementRequest&
         {
             const LBVec3 p = walk.At(i);
             ++totalPoints;
-            void* n = spawn(nullptr, &p, &edgeRot, userData);
+#if EDITOR
+            // Mask gate (1D along perimeter U).
+            if (useMask)
+            {
+                const float t = (float)perimIndex / (float)totalForMask;
+                perimIndex++;
+                const LBToolMaskImage::Pixel mp = LBToolMaskImage::Sample(sMask, t, 0.5f);
+                const int lum = ((int)mp.r + (int)mp.g + (int)mp.b) / 3;
+                const bool passes = sMaskInvert ? (lum < mthresh255) : (lum >= mthresh255);
+                if (!passes) continue;
+            }
+            const char* asset = LBToolPicker::PickFromList(sTargets, nullptr, rng);
+#else
+            const char* asset = nullptr;
+#endif
+            void* n = spawn(asset, &p, &edgeRot, userData);
             if (n) { lastSpawned = n; ++placed; }
         }
     }
@@ -274,6 +328,54 @@ void LBToolBox::DrawSettingsUI()
             "edge uses the bare R rotation.");
     }
 
+    // ---- Targets ----
+    LevelBuilderCoreAPI* lbApi = LevelBuilderCoreLoader::Get();
+    std::vector<LBToolPicker::PieceChoice> pieces =
+        LBToolPicker::CollectActiveKitPieces(lbApi);
+    const std::string projectRoot = LBToolPicker::CachedProjectRoot();
+    const std::string kitFolder   = LBToolPicker::GetActiveKitFolder(lbApi);
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Targets (random pick per step)");
+    if (sTargets.empty())
+    {
+        ImGui::TextDisabled("(empty → uses active palette piece)");
+    }
+    else
+    {
+        for (int i = 0; i < (int)sTargets.size(); ++i)
+        {
+            ImGui::PushID(i);
+            const LBToolPicker::PieceChoice* pc =
+                LBToolPicker::FindByAsset(pieces, sTargets[i]);
+            LBToolPicker::DrawThumbButton(pc, projectRoot, kitFolder,
+                                          32.0f, false, "box_tgt", "?");
+            if (ImGui::IsItemHovered() && pc)
+                ImGui::SetTooltip("%s", pc->display.c_str());
+            ImGui::PopID();
+            if (i + 1 < (int)sTargets.size()) ImGui::SameLine();
+        }
+    }
+    if (ImGui::Button("Edit targets…##box_edit_targets", ImVec2(150, 0)))
+    {
+        sOpenTargetsPicker = true;
+        sJustOpened        = true;
+    }
+
+    // ---- Optional mask (1D along perimeter) ----
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Mask (1D — along perimeter)##box_mask"))
+    {
+        ImGui::Checkbox("Use mask##box_use_mask", &sUseMask);
+        if (sUseMask)
+        {
+            LBToolMaskImage::DrawMaskUI(sMask, "box");
+            ImGui::SliderFloat("Threshold##box_mt", &sMaskThreshold, 0.0f, 1.0f, "%.2f");
+            ImGui::Checkbox("Invert##box_mi", &sMaskInvert);
+            ImGui::TextDisabled("Sampled at (t, 0.5) along the perimeter — fence-with-gaps for rectangles.");
+        }
+    }
+
     if (sHasStart)
     {
         ImGui::TextColored(ImVec4(0.20f, 1.00f, 0.30f, 0.85f),
@@ -286,6 +388,16 @@ void LBToolBox::DrawSettingsUI()
     }
     else
     {
+        // Targets modal — opened from latch above.
+        if (sOpenTargetsPicker)
+        {
+            ImGui::OpenPopup("Box: Targets##box_tgt_modal");
+            sOpenTargetsPicker = false;
+        }
+        LBToolPicker::DrawPiecePickerModal("Box: Targets##box_tgt_modal",
+                                           "Box — multi-select (random per step)",
+                                           /*multiSelect=*/true, /*allowAny=*/false,
+                                           sJustOpened, &sTargets);
         ImGui::TextDisabled("Click in the viewport to set the first corner.");
         ImGui::TextDisabled("Pieces are placed along the four edges of the rectangle.");
         ImGui::TextDisabled("The second corner snaps so width and depth are stride-multiples.");

@@ -7,11 +7,17 @@
 #if EDITOR
 #include "imgui.h"
 #include "Plugins/PolyphaseEngineAPI.h"
+#include "LBToolPicker.h"
+#include "LBToolMaskImage.h"
+#include "LBToolDistribution.h"
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace
 {
@@ -26,6 +32,22 @@ namespace
     bool   sHasStart = false;
     LBVec3 sStart{0,0,0};
     float  sStride = 1.0f;
+
+    // Multi-target picker — random pick per step. Empty → falls back
+    // to the active palette piece (legacy behavior).
+    std::vector<std::string> sTargets;
+    bool sOpenTargetsPicker = false;
+    bool sJustOpened        = false;
+    uint32_t sSeed          = 0xDEADu;
+
+    // Optional mask along the line. Mask sampled at (t, 0.5) per step —
+    // 1D usage of a 2D mask. Useful for "fence with gaps" pattern.
+#if EDITOR
+    LBToolMaskImage::MaskState sMask;
+#endif
+    bool  sUseMask       = false;
+    float sMaskThreshold = 0.50f;
+    bool  sMaskInvert    = false;
 }
 
 bool LBToolLine::CanPlace(const LevelBuilderPlacementRequest& /*request*/)
@@ -93,15 +115,35 @@ LevelBuilderPlacementResult LBToolLine::Place(const LevelBuilderPlacementRequest
 #if EDITOR
     PolyphaseEngineAPI* eng = (PolyphaseEngineAPI*)api->GetEngineAPI();
     if (eng && eng->EditorAction_BeginGroup) eng->EditorAction_BeginGroup("Line");
+    LBToolDistribution::Rng rng = LBToolDistribution::SeedRng(sSeed);
+    sSeed = (sSeed * 1103515245u + 12345u) | 1u;
+    const bool useMask = sUseMask && LBToolMaskImage::EnsureLoaded(sMask);
+    const int  mthresh255 = (int)(std::clamp(sMaskThreshold, 0.0f, 1.0f) * 255.0f);
 #endif
 
     void* lastSpawned = nullptr;
     int   placed      = 0;
-    for (int i = 0; i < walk.PieceCount(); ++i)
+    const int count = walk.PieceCount();
+    for (int i = 0; i < count; ++i)
     {
         const LBVec3 pos = walk.At(i);
-        // assetName=null tells the sibling to use the active palette piece.
-        void* n = spawn(nullptr, &pos, &request.rotation, userData);
+
+#if EDITOR
+        // Mask gate — sample at (t, 0.5) along the line. 1D usage of
+        // the 2D mask; lets the user paint a "fence with gaps."
+        if (useMask)
+        {
+            const float t = (count > 1) ? ((float)i / (float)(count - 1)) : 0.5f;
+            const LBToolMaskImage::Pixel p = LBToolMaskImage::Sample(sMask, t, 0.5f);
+            const int lum = ((int)p.r + (int)p.g + (int)p.b) / 3;
+            const bool passes = sMaskInvert ? (lum < mthresh255) : (lum >= mthresh255);
+            if (!passes) continue;
+        }
+        const char* asset = LBToolPicker::PickFromList(sTargets, nullptr, rng);
+#else
+        const char* asset = nullptr;
+#endif
+        void* n = spawn(asset, &pos, &request.rotation, userData);
         if (n) { lastSpawned = n; ++placed; }
     }
 
@@ -142,6 +184,54 @@ void LBToolLine::DrawSettingsUI()
 
     ImGui::SliderFloat("Stride", &sStride, 0.1f, 10.0f, "%.2f");
 
+    // ---- Targets (random pick per step) ----
+    LevelBuilderCoreAPI* api = LevelBuilderCoreLoader::Get();
+    std::vector<LBToolPicker::PieceChoice> pieces =
+        LBToolPicker::CollectActiveKitPieces(api);
+    const std::string projectRoot = LBToolPicker::CachedProjectRoot();
+    const std::string kitFolder   = LBToolPicker::GetActiveKitFolder(api);
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Targets (random pick per step)");
+    if (sTargets.empty())
+    {
+        ImGui::TextDisabled("(empty → uses active palette piece)");
+    }
+    else
+    {
+        for (int i = 0; i < (int)sTargets.size(); ++i)
+        {
+            ImGui::PushID(i);
+            const LBToolPicker::PieceChoice* pc =
+                LBToolPicker::FindByAsset(pieces, sTargets[i]);
+            LBToolPicker::DrawThumbButton(pc, projectRoot, kitFolder,
+                                          32.0f, false, "line_tgt", "?");
+            if (ImGui::IsItemHovered() && pc)
+                ImGui::SetTooltip("%s", pc->display.c_str());
+            ImGui::PopID();
+            if (i + 1 < (int)sTargets.size()) ImGui::SameLine();
+        }
+    }
+    if (ImGui::Button("Edit targets…##line_edit_targets", ImVec2(150, 0)))
+    {
+        sOpenTargetsPicker = true;
+        sJustOpened        = true;
+    }
+
+    // ---- Optional mask ----
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Mask (1D — sample along line)##line_mask"))
+    {
+        ImGui::Checkbox("Use mask##line_use_mask", &sUseMask);
+        if (sUseMask)
+        {
+            LBToolMaskImage::DrawMaskUI(sMask, "line");
+            ImGui::SliderFloat("Threshold##line_mt", &sMaskThreshold, 0.0f, 1.0f, "%.2f");
+            ImGui::Checkbox("Invert##line_mi", &sMaskInvert);
+            ImGui::TextDisabled("Sampled at (t, 0.5) along the line — useful for fence-with-gaps.");
+        }
+    }
+
     if (sHasStart)
     {
         ImGui::TextColored(ImVec4(0.20f, 1.00f, 0.30f, 0.85f),
@@ -157,6 +247,17 @@ void LBToolLine::DrawSettingsUI()
         ImGui::TextDisabled("Click in the viewport to set the start point.");
         ImGui::TextDisabled("Tip: hold Shift before the second click to lock to a cardinal axis.");
     }
+
+    // Targets modal.
+    if (sOpenTargetsPicker)
+    {
+        ImGui::OpenPopup("Line: Targets##line_tgt_modal");
+        sOpenTargetsPicker = false;
+    }
+    LBToolPicker::DrawPiecePickerModal("Line: Targets##line_tgt_modal",
+                                       "Line — multi-select (random per step)",
+                                       /*multiSelect=*/true, /*allowAny=*/false,
+                                       sJustOpened, &sTargets);
 #endif
 }
 

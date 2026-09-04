@@ -7,11 +7,17 @@
 #if EDITOR
 #include "imgui.h"
 #include "Plugins/PolyphaseEngineAPI.h"
+#include "LBToolPicker.h"
+#include "LBToolMaskImage.h"
+#include "LBToolDistribution.h"
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace
 {
@@ -20,6 +26,18 @@ namespace
     bool   sHasStart = false;
     LBVec3 sStart{0, 0, 0};
     float  sStride = 1.0f;
+
+    // Multi-target + mask state.
+    std::vector<std::string> sTargets;
+    bool sOpenTargetsPicker = false;
+    bool sJustOpened        = false;
+    uint32_t sSeed          = 0xCAFEu;
+#if EDITOR
+    LBToolMaskImage::MaskState sMask;
+#endif
+    bool  sUseMask       = false;
+    float sMaskThreshold = 0.50f;
+    bool  sMaskInvert    = false;
 
     // Hard cap on total cells per commit. Mirrors Line/Box's safety net
     // for the case where the user picks a 0.05 stride and clicks across
@@ -121,6 +139,10 @@ LevelBuilderPlacementResult LBToolBoxFill::Place(const LevelBuilderPlacementRequ
 #if EDITOR
     PolyphaseEngineAPI* engApi = (PolyphaseEngineAPI*)api->GetEngineAPI();
     if (engApi && engApi->EditorAction_BeginGroup) engApi->EditorAction_BeginGroup("BoxFill");
+    LBToolDistribution::Rng rng = LBToolDistribution::SeedRng(sSeed);
+    sSeed = (sSeed * 1103515245u + 12345u) | 1u;
+    const bool useMask = sUseMask && LBToolMaskImage::EnsureLoaded(sMask);
+    const int  mthresh255 = (int)(std::clamp(sMaskThreshold, 0.0f, 1.0f) * 255.0f);
 #endif
 
     for (int iz = 0; iz < e.nz; ++iz)
@@ -131,7 +153,23 @@ LevelBuilderPlacementResult LBToolBoxFill::Place(const LevelBuilderPlacementRequ
             const float x = e.minX + ix * e.stride;
             const LBVec3 p{x, e.y, z};
             ++totalPoints;
-            void* n = spawn(nullptr, &p, &request.rotation, userData);
+
+#if EDITOR
+            // Mask gate (2D, cell → rectangle UV).
+            if (useMask)
+            {
+                const float u = (e.nx > 1) ? ((float)ix / (float)(e.nx - 1)) : 0.5f;
+                const float v = (e.nz > 1) ? ((float)iz / (float)(e.nz - 1)) : 0.5f;
+                const LBToolMaskImage::Pixel mp = LBToolMaskImage::Sample(sMask, u, v);
+                const int lum = ((int)mp.r + (int)mp.g + (int)mp.b) / 3;
+                const bool passes = sMaskInvert ? (lum < mthresh255) : (lum >= mthresh255);
+                if (!passes) continue;
+            }
+            const char* asset = LBToolPicker::PickFromList(sTargets, nullptr, rng);
+#else
+            const char* asset = nullptr;
+#endif
+            void* n = spawn(asset, &p, &request.rotation, userData);
             if (n) { lastSpawned = n; ++placed; }
         }
     }
@@ -171,6 +209,63 @@ void LBToolBoxFill::DrawSettingsUI()
     ImGui::Separator();
 
     ImGui::SliderFloat("Stride", &sStride, 0.1f, 10.0f, "%.2f");
+
+    // ---- Targets ----
+    LevelBuilderCoreAPI* lbApi = LevelBuilderCoreLoader::Get();
+    std::vector<LBToolPicker::PieceChoice> pieces =
+        LBToolPicker::CollectActiveKitPieces(lbApi);
+    const std::string projectRoot = LBToolPicker::CachedProjectRoot();
+    const std::string kitFolder   = LBToolPicker::GetActiveKitFolder(lbApi);
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Targets (random pick per cell)");
+    if (sTargets.empty())
+    {
+        ImGui::TextDisabled("(empty → uses active palette piece)");
+    }
+    else
+    {
+        for (int i = 0; i < (int)sTargets.size(); ++i)
+        {
+            ImGui::PushID(i);
+            const LBToolPicker::PieceChoice* pc =
+                LBToolPicker::FindByAsset(pieces, sTargets[i]);
+            LBToolPicker::DrawThumbButton(pc, projectRoot, kitFolder,
+                                          32.0f, false, "bf_tgt", "?");
+            if (ImGui::IsItemHovered() && pc)
+                ImGui::SetTooltip("%s", pc->display.c_str());
+            ImGui::PopID();
+            if (i + 1 < (int)sTargets.size()) ImGui::SameLine();
+        }
+    }
+    if (ImGui::Button("Edit targets…##bf_edit_targets", ImVec2(150, 0)))
+    {
+        sOpenTargetsPicker = true;
+        sJustOpened        = true;
+    }
+
+    // ---- Optional mask (2D, gates cells) ----
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Mask (2D — gates cells)##bf_mask"))
+    {
+        ImGui::Checkbox("Use mask##bf_use_mask", &sUseMask);
+        if (sUseMask)
+        {
+            LBToolMaskImage::DrawMaskUI(sMask, "bf");
+            ImGui::SliderFloat("Threshold##bf_mt", &sMaskThreshold, 0.0f, 1.0f, "%.2f");
+            ImGui::Checkbox("Invert##bf_mi", &sMaskInvert);
+        }
+    }
+
+    if (sOpenTargetsPicker)
+    {
+        ImGui::OpenPopup("BoxFill: Targets##bf_tgt_modal");
+        sOpenTargetsPicker = false;
+    }
+    LBToolPicker::DrawPiecePickerModal("BoxFill: Targets##bf_tgt_modal",
+                                       "BoxFill — multi-select (random per cell)",
+                                       /*multiSelect=*/true, /*allowAny=*/false,
+                                       sJustOpened, &sTargets);
 
     if (sHasStart)
     {
